@@ -1,7 +1,7 @@
 // 1. Firebase console → Project settings → General → "Your apps" → Web app.
 // 2. Copy the firebaseConfig values here. (These values are public by design;
 //    your data is protected by firestore.rules, not by hiding this file.)
-const firebaseConfig = {
+export const firebaseConfig = {
 
   apiKey: "AIzaSyBC-Vk32Sbt75QwmKYBELHh0GUPafjI6a4",
 
