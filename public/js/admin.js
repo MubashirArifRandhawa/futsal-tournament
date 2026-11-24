@@ -647,7 +647,7 @@ function ManageView({ tid, tab }) {
         const { h, a } = scoreOf(m);
         const status = m.status === 'live' ? ui.liveBadge(m, t) : m.status === 'ft' ? '<span class="ft-badge">FT</span>' : `<span class="muted">${ui.fmtTime(m.kickoffAt)}</span>`;
         return `<div class="arow ${m.status === 'live' ? 'arow--live' : ''}">
-          <span class="arow-time">${ui.fmtTime(m.kickoffAt)}<small>${esc(ui.stageLabel(m))}${(t.courts || 1) > 1 ? ` · C${esc(m.court)}` : ''}</small></span>
+          <span class="arow-time">${ui.fmtTime(m.kickoffAt)}<small>${esc(ui.fmtDay(m.kickoffAt))}</small><small>${esc(ui.stageLabel(m))}${(t.courts || 1) > 1 ? ` · C${esc(m.court)}` : ''}</small></span>
           <span class="arow-teams"><span class="r">${esc(teamLabel(m, 'home'))} ${crest(state.teamMap[m.homeId], 22)}</span><b class="arow-score">${m.status === 'scheduled' ? 'v' : `${h} – ${a}`}</b><span>${crest(state.teamMap[m.awayId], 22)} ${esc(teamLabel(m, 'away'))}</span></span>
           <span class="arow-status">${status}</span>
           <span class="arow-ref">${icon.whistle} ${m.referee ? esc(m.referee) : '<span class="muted">No referee</span>'}</span>
