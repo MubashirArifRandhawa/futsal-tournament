@@ -229,7 +229,7 @@ function home(t) {
       <div class="hero-text">
         ${statusChip(t)}
         <h1>${esc(t.name)}</h1>
-        <p class="hero-meta">${t.venue ? `${icon.pin}${esc(t.venue)}` : ''}<span>${icon.clock}${esc(ui.fmtLongDay(t.startAt || first?.kickoffAt))}</span></p>
+        <p class="hero-meta">${t.venue ? `${icon.pin}${esc(t.venue)}` : ''}<span>${icon.clock}${esc(ui.fmtLongDay(first?.kickoffAt || t.startAt))}</span></p>
         <div class="hero-stats">
           <div><b>${state.teams.length}</b><span>Teams</span></div>
           <div><b>${ms.length}</b><span>Matches</span></div>

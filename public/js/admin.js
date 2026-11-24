@@ -719,20 +719,32 @@ function editTournament(t) {
       <label>Start<input type="datetime-local" name="startAt" value="${esc(toLocalInput(t.startAt))}"></label>
       <label>Status<select name="status">${['draft', 'live', 'completed'].map((s) => `<option value="${s}" ${t.status === s ? 'selected' : ''}>${{ draft: 'Not started', live: 'Live', completed: 'Completed' }[s]}</option>`).join('')}</select></label>
       <label>Courts<input type="number" name="courts" min="1" max="4" value="${esc(t.courts || 1)}"></label>
-    </div><p class="muted small">Changing the start time here does not move match kick-off times; edit those per match.</p>`,
+    </div>
+    <label class="check"><input type="checkbox" name="shift" checked> Move all match kick-off times so the first match starts at this time</label>
+    <p class="muted small">Matches that have already started or finished keep their times.</p>`,
     {
       onSubmit: (f) =>
-        guard(
-          () =>
-            updateDoc(tRef(t.id), {
-              name: f.name.value.trim() || t.name,
-              venue: f.venue.value.trim(),
-              startAt: fromLocalInput(f.startAt.value) || t.startAt,
-              status: f.status.value,
-              courts: +f.courts.value || 1,
-            }),
-          'Saved'
-        ),
+        guard(async () => {
+          const newStart = fromLocalInput(f.startAt.value) || t.startAt;
+          const b = writeBatch(db);
+          b.update(tRef(t.id), {
+            name: f.name.value.trim() || t.name,
+            venue: f.venue.value.trim(),
+            startAt: newStart,
+            status: f.status.value,
+            courts: +f.courts.value || 1,
+          });
+          if (f.shift.checked && state.tid === t.id) {
+            // reference = earliest kick-off, so a schedule that drifted re-aligns exactly
+            const first = Math.min(...state.matches.map((m) => m.kickoffAt || Infinity));
+            const delta = Number.isFinite(first) ? newStart - first : 0;
+            if (delta)
+              state.matches
+                .filter((m) => m.status === 'scheduled' && m.kickoffAt)
+                .forEach((m) => b.update(mRef(t.id, m.id), { kickoffAt: m.kickoffAt + delta }));
+          }
+          await b.commit();
+        }, 'Saved'),
     }
   );
 }
