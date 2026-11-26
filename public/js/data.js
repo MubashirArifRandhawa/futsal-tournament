@@ -253,3 +253,19 @@ export function teamLabel(m, side, teamMap = state.teamMap) {
   const t = teamMap[side === 'home' ? m.homeId : m.awayId];
   return t ? t.name : (side === 'home' ? m.homeLabel : m.awayLabel) || 'TBD';
 }
+
+// ---------- rewards ----------
+// `link` ties a reward to a live result so the site can show who holds it:
+// champion | runnerup | topscorer | topassist | '' (organiser fills `winner`).
+export const DEFAULT_REWARDS = [
+  { title: 'Champions', prize: "Winners' trophy + gold medals", link: 'champion', winner: '' },
+  { title: 'Runners-up', prize: 'Silver medals', link: 'runnerup', winner: '' },
+  { title: 'Golden Boot', prize: 'Top scorer award', link: 'topscorer', winner: '' },
+  { title: 'Best Goalkeeper', prize: 'Individual award', link: '', winner: '' },
+  { title: 'Player of the Tournament', prize: 'Individual award', link: '', winner: '' },
+];
+export const REWARD_LINKS = { champion: 'Champions (auto)', runnerup: 'Runners-up (auto)', topscorer: 'Top scorer (auto)', topassist: 'Most assists (auto)', '': 'Chosen by organiser' };
+export const rewardsOf = (t) => (Array.isArray(t?.rewards) ? t.rewards : DEFAULT_REWARDS);
+
+/** Minute label for an event; quick-entered results may have no minute. */
+export const minuteText = (e) => (e?.minute == null || e.minute === '' ? '' : `${e.minute}'`);

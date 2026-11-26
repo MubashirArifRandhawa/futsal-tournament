@@ -15,6 +15,8 @@ import {
   lineupFor,
   teamLabel,
   byKickoff,
+  rewardsOf,
+  minuteText,
 } from './data.js';
 import * as ui from './ui.js';
 import { SITE_NAME } from './firebase-config.js';
@@ -67,6 +69,7 @@ function render() {
     else window.scrollTo(0, 0);
   }
   lastPath = r.path;
+  attachTrophy();
   updateChrome(r.path);
   flashScores();
   announceGoals();
@@ -115,7 +118,7 @@ function announceGoals() {
       const { h, a } = scoreOf(m);
       const who = e.playerId ? playerName(idx[e.playerId]) : '';
       ui.toast(
-        `<b>GOAL!</b> ${esc(teamLabel(m, 'home'))} ${h}–${a} ${esc(teamLabel(m, 'away'))}${who ? `<br><small>${esc(who)}${e.type === 'own_goal' ? ' (OG)' : ''} ${esc(e.minute)}'</small>` : ''}`,
+        `<b>GOAL!</b> ${esc(teamLabel(m, 'home'))} ${h}–${a} ${esc(teamLabel(m, 'away'))}${who ? `<br><small>${esc(who)}${e.type === 'own_goal' ? ' (OG)' : ''} ${esc(minuteText(e))}</small>` : ''}`,
         'toast--goal'
       );
     }
@@ -141,6 +144,95 @@ function tick() {
     const s = Math.floor((ms % 6e4) / 1e3);
     el.textContent = d ? `${d}d ${h}h ${mi}m` : `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   });
+}
+
+// ---------------- 3D trophy ----------------
+// The WebGL canvas lives in one element that is moved into #trophy-slot after
+// every render, so live score updates never rebuild the 3D scene.
+let trophyEl = null;
+function attachTrophy() {
+  const slot = document.getElementById('trophy-slot');
+  if (!slot) return;
+  if (!trophyEl) {
+    trophyEl = document.createElement('div');
+    trophyEl.className = 'trophy3d';
+    trophyEl.innerHTML = '<div class="trophy3d-msg"><div class="spinner"></div></div>';
+    import('./trophy3d.js')
+      .then((mod) => mod.mountTrophy(trophyEl))
+      .catch((e) => {
+        console.error(e);
+        trophyEl.innerHTML = '<div class="trophy3d-msg">The 3D trophy needs WebGL, which this browser could not start.</div>';
+      });
+  }
+  if (trophyEl.parentNode !== slot) slot.appendChild(trophyEl);
+}
+
+const rewardIcon = {
+  champion: '<svg viewBox="0 0 24 24"><path d="M7 4h10v4a5 5 0 0 1-10 0z M7 6H4v1a3 3 0 0 0 3 3 M17 6h3v1a3 3 0 0 1-3 3 M12 13v4 M8 20h8 M9.5 17h5v3h-5z"/></svg>',
+  runnerup: '<svg viewBox="0 0 24 24"><circle cx="12" cy="15" r="5"/><path d="M8.5 11 6 3h4l2 5 2-5h4l-2.5 8"/></svg>',
+  topscorer: '<svg viewBox="0 0 24 24"><path d="M3 15c3 0 5-1 7-4l2-3c1 2 3 3 6 3 2 0 3 1 3 2v2H3z M3 15v2h18 M6 19v1 M10 19v1 M16 19v1"/></svg>',
+  topassist: '<svg viewBox="0 0 24 24"><path d="M5 12h11 M12 7l5 5-5 5"/><circle cx="5" cy="12" r="2"/></svg>',
+  '': '<svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.4 6.7 19.4l1.2-6L3.4 9.3l6-.7z"/></svg>',
+};
+
+/** Who holds (or currently leads for) a reward. */
+function rewardHolder(r, t) {
+  const ms = state.matches;
+  const final = ms.find((m) => m.stage === 'final');
+  const leagueLeft = ms.some((m) => (m.stage || 'league') === 'league' && m.status !== 'ft');
+  const decided = t.status === 'completed' || (final ? final.status === 'ft' : !leagueLeft && ms.length > 0);
+  const anyPlayed = ms.some((m) => m.status === 'ft');
+  const rows = computeStandings();
+  const L = leaders();
+  const team = (x) => (x ? { name: x.name, crest: crest(x, 26) } : null);
+  let who = null;
+  if (r.link === 'champion' || r.link === 'runnerup') {
+    if (final && final.status === 'ft') {
+      const w = winnerOf(final);
+      const lose = w && state.teamMap[w.id === final.homeId ? final.awayId : final.homeId];
+      who = team(r.link === 'champion' ? w : lose);
+    } else if (anyPlayed) who = team(rows[r.link === 'champion' ? 0 : 1]?.team);
+  } else if (r.link === 'topscorer' || r.link === 'topassist') {
+    const top = (r.link === 'topscorer' ? L.scorers : L.assists)[0];
+    if (top) {
+      const n = r.link === 'topscorer' ? top.goals : top.assists;
+      const tm = state.teamMap[top.teamId];
+      who = { name: `${playerName(top.player)} · ${n} ${r.link === 'topscorer' ? (n === 1 ? 'goal' : 'goals') : n === 1 ? 'assist' : 'assists'}`, crest: tm ? crest(tm, 26) : '' };
+    }
+  } else if (r.winner) return { label: 'Winner', name: r.winner, crest: '' };
+  if (!who) return null;
+  // final standings of a league-only competition, or a played final, are settled
+  const settled = r.link === 'champion' || r.link === 'runnerup' ? decided : t.status === 'completed';
+  return { label: settled ? 'Winner' : 'Leading', ...who };
+}
+
+function rewardsSection(t) {
+  const list = rewardsOf(t);
+  return `<section class="trophy-sec">
+    <div class="trophy-stage">
+      <div id="trophy-slot"></div>
+      <span class="trophy-hint">Drag to rotate · scroll or pinch to zoom · double-tap to reset</span>
+    </div>
+    <div class="rewards">
+      <span class="rewards-eyebrow">Up for grabs</span>
+      <h2>Trophy &amp; rewards</h2>
+      ${
+        list.length
+          ? `<ul class="rewards-list">${list
+              .map((r, i) => {
+                const h = rewardHolder(r, t);
+                return `<li class="reward ${i === 0 ? 'reward--top' : ''}">
+              <span class="reward-ico">${rewardIcon[r.link || ''] || rewardIcon['']}</span>
+              <span class="reward-main"><b>${esc(r.title)}</b>${r.prize ? `<small>${esc(r.prize)}</small>` : ''}</span>
+              <span class="reward-holder">${
+                h ? `<em class="${h.label === 'Winner' ? 'won' : ''}">${esc(h.label)}</em><span>${h.crest || ''}<b>${esc(h.name)}</b></span>` : '<em>To be decided</em>'
+              }</span></li>`;
+              })
+              .join('')}</ul>`
+          : '<p class="muted">Rewards will be announced soon.</p>'
+      }
+    </div>
+  </section>`;
 }
 
 // ---------------- shared bits ----------------
@@ -171,12 +263,13 @@ function scorersLine(m, side) {
   const other = side === 'home' ? m.awayId : m.homeId;
   const list = (m.events || [])
     .filter((e) => (e.type === 'goal' && e.teamId === teamId) || (e.type === 'own_goal' && e.teamId === other))
+    .filter((e) => e.playerId || minuteText(e)) // skip goals entered as a bare score
     .sort((a, b) => (a.minute || 0) - (b.minute || 0));
   const by = new Map();
   list.forEach((e) => {
     const name = e.playerId ? playerName(idx[e.playerId]) : 'Goal';
-    const tag = `${e.minute}'${e.type === 'own_goal' ? ' OG' : e.pen ? ' pen' : ''}`;
-    by.set(name, [...(by.get(name) || []), tag]);
+    const tag = `${minuteText(e)}${e.type === 'own_goal' ? ' OG' : e.pen ? ' pen' : ''}`.trim();
+    by.set(name, tag ? [...(by.get(name) || []), tag] : by.get(name) || []);
   });
   return [...by].map(([n, mins]) => `<li>${esc(n)} <span>${esc(mins.join(', '))}</span></li>`).join('');
 }
@@ -250,6 +343,8 @@ function home(t) {
   </section>
 
   ${live.length ? `<section>${sectionHead('Live now')}<div class="livegrid">${live.map((m) => liveCard(m, t)).join('')}</div></section>` : ''}
+
+  ${rewardsSection(t)}
 
   <div class="grid-2">
     <div>
@@ -506,7 +601,7 @@ function timeline(m) {
     } else if (e.type === 'yellow') sub = 'Yellow card';
     else if (e.type === 'red') sub = 'Red card';
     const goalish = e.type === 'goal' || e.type === 'own_goal';
-    items.push(`<li class="tl tl--${side} ${goalish ? 'tl--goal' : ''}"><span class="tl-min">${esc(e.minute)}'</span>
+    items.push(`<li class="tl tl--${side} ${goalish ? 'tl--goal' : ''}"><span class="tl-min">${esc(minuteText(e))}</span>
       <span class="tl-body"><span class="tl-ico">${ui.eventIcon(e.type)}</span><span><b>${main}</b>${sub ? `<small>${sub}</small>` : ''}</span></span></li>`);
   }
   if (!htShown) items.push(`<li class="tl-mark">Half-time</li>`);

@@ -26,6 +26,9 @@ import {
   playerIndex,
   POSITIONS,
   byKickoff,
+  rewardsOf,
+  REWARD_LINKS,
+  minuteText,
 } from './data.js';
 import * as ui from './ui.js';
 import { buildFallbackSchedule, cleanInput, FORMATS } from './scheduler.js';
@@ -600,6 +603,7 @@ function NewView() {
 // ---------- manage one tournament ----------
 function ManageView({ tid, tab }) {
   let el;
+  let swapFrom = null; // id of the first match picked for a swap
   const render = () => {
     const t = tournament();
     if (!isReady() || state.tid !== tid) return (el.innerHTML = `<div class="loading"><div class="spinner"></div></div>`);
@@ -646,17 +650,28 @@ function ManageView({ tid, tab }) {
       .map((m) => {
         const { h, a } = scoreOf(m);
         const status = m.status === 'live' ? ui.liveBadge(m, t) : m.status === 'ft' ? '<span class="ft-badge">FT</span>' : `<span class="muted">${ui.fmtTime(m.kickoffAt)}</span>`;
-        return `<div class="arow ${m.status === 'live' ? 'arow--live' : ''}">
+        const canSwap = m.status === 'scheduled';
+        return `<div class="arow ${m.status === 'live' ? 'arow--live' : ''} ${swapFrom === m.id ? 'arow--swapping' : ''} ${swapFrom && swapFrom !== m.id && canSwap ? 'arow--swaptarget' : ''}">
           <span class="arow-time">${ui.fmtTime(m.kickoffAt)}<small>${esc(ui.fmtDay(m.kickoffAt))}</small><small>${esc(ui.stageLabel(m))}${(t.courts || 1) > 1 ? ` · C${esc(m.court)}` : ''}</small></span>
           <span class="arow-teams"><span class="r">${esc(teamLabel(m, 'home'))} ${crest(state.teamMap[m.homeId], 22)}</span><b class="arow-score">${m.status === 'scheduled' ? 'v' : `${h} – ${a}`}</b><span>${crest(state.teamMap[m.awayId], 22)} ${esc(teamLabel(m, 'away'))}</span></span>
           <span class="arow-status">${status}</span>
           <span class="arow-ref">${icon.whistle} ${m.referee ? esc(m.referee) : '<span class="muted">No referee</span>'}</span>
-          <span class="arow-actions"><button class="btn btn-ghost btn-sm" data-edit-match="${esc(m.id)}">Edit</button><a class="btn btn-primary btn-sm" href="#/t/${esc(tid)}/match/${esc(m.id)}">${
+          <span class="arow-actions">${
+            canSwap
+              ? `<button class="btn btn-ghost btn-sm swapbtn" data-swap-match="${esc(m.id)}" title="Swap this match's time slot with another match">${swapFrom === m.id ? 'Cancel' : swapFrom ? '⇅ Here' : '⇅ Swap'}</button>`
+              : ''
+          }<button class="btn btn-ghost btn-sm" data-edit-match="${esc(m.id)}">Edit</button><button class="btn btn-ghost btn-sm" data-result="${esc(m.id)}" title="Enter the final score (and scorers) without running the clock">${
+          m.status === 'ft' ? 'Edit result' : 'Result'
+        }</button><a class="btn btn-primary btn-sm" href="#/t/${esc(tid)}/match/${esc(m.id)}">${
           m.status === 'live' ? 'Control ●' : m.status === 'ft' ? 'Open' : 'Run match'
         }</a></span></div>`;
       })
       .join('');
-    return `<div class="row between"><p class="muted small">Tip: add referees here, then press <b>Run match</b> to go live.</p><button class="btn btn-ghost btn-sm" data-act="add-match">+ Add match</button></div>
+    const from = swapFrom && findMatch(swapFrom);
+    const banner = from
+      ? `<div class="swapbar"><span>⇅ Swapping <b>${esc(teamLabel(from, 'home'))} v ${esc(teamLabel(from, 'away'))}</b> (${esc(ui.fmtTime(from.kickoffAt))}). Now press <b>⇅ Here</b> on the match it should trade places with.</span><button class="btn btn-ghost btn-sm" data-swap-cancel>Cancel</button></div>`
+      : '';
+    return `<div class="row between"><p class="muted small">Tip: <b>⇅ Swap</b> trades the time slots of two matches (e.g. when a team is late). <b>Result</b> lets you type in a score without running the clock.</p><button class="btn btn-ghost btn-sm" data-act="add-match">+ Add match</button></div>${banner}
       <div class="card card--flush alist">${rows || '<p class="pad muted">No matches.</p>'}</div>`;
   }
 
@@ -704,13 +719,217 @@ function ManageView({ tid, tab }) {
         if (a) act(a.dataset.act);
         const em = e.target.closest('[data-edit-match]');
         if (em) editMatch(findMatch(em.dataset.editMatch));
+        const rs = e.target.closest('[data-result]');
+        if (rs) resultModal(findMatch(rs.dataset.result));
+        if (e.target.closest('[data-swap-cancel]')) {
+          swapFrom = null;
+          render();
+        }
+        const sw = e.target.closest('[data-swap-match]');
+        if (sw) pickSwap(sw.dataset.swapMatch);
       });
     },
     update: render,
   };
+
+  async function pickSwap(id) {
+    if (!swapFrom || swapFrom === id) {
+      swapFrom = swapFrom === id ? null : id;
+      return render();
+    }
+    const a = findMatch(swapFrom);
+    const b = findMatch(id);
+    swapFrom = null;
+    render();
+    if (!a || !b) return;
+    if (a.status !== 'scheduled' || b.status !== 'scheduled') return ui.toast('<b>!</b> Only matches that have not started can be swapped.', 'toast--error');
+    const line = (m) => `<b>${esc(teamLabel(m, 'home'))} v ${esc(teamLabel(m, 'away'))}</b> (${esc(ui.fmtTime(m.kickoffAt))})`;
+    if (!(await confirmBox('Swap time slots?', `${line(a)} will move to ${esc(ui.fmtTime(b.kickoffAt))}, and ${line(b)} will move to ${esc(ui.fmtTime(a.kickoffAt))}.`, 'Swap', false))) return;
+    const slotOf = (m) => ({ kickoffAt: m.kickoffAt, court: m.court || 1, round: m.round || 1, slot: m.slot || 0 });
+    const b2 = writeBatch(db);
+    b2.update(mRef(tid, a.id), slotOf(b));
+    b2.update(mRef(tid, b.id), slotOf(a));
+    await guard(() => b2.commit(), 'Matches swapped');
+    const after = state.matches.map((m) => (m.id === a.id ? { ...m, ...slotOf(b) } : m.id === b.id ? { ...m, ...slotOf(a) } : m));
+    const clash = backToBack(after);
+    if (clash.length) ui.toast(`<b>Heads up</b> ${esc(clash.join(', '))} now play${clash.length === 1 ? 's' : ''} two matches in a row.`, '');
+  }
+}
+
+/** Teams that play in two consecutive time slots (no rest in between). */
+function backToBack(matches) {
+  const times = [...new Set(matches.map((m) => m.kickoffAt).filter(Boolean))].sort((x, y) => x - y);
+  const playing = (t) => new Set(matches.filter((m) => m.kickoffAt === t).flatMap((m) => [m.homeId, m.awayId]).filter(Boolean));
+  const out = new Set();
+  for (let i = 1; i < times.length; i++) {
+    const prev = playing(times[i - 1]);
+    for (const id of playing(times[i])) if (prev.has(id)) out.add(state.teamMap[id]?.name || 'A team');
+  }
+  return [...out];
+}
+
+/**
+ * Type in a result without running the clock: final score only, or score plus
+ * any scorers you know. Goals without a named scorer are stored as
+ * "unknown scorer" goals so the score, table and stats all stay consistent.
+ */
+function resultModal(m) {
+  if (!m) return;
+  const tid = state.tid;
+  const t = tournament();
+  if (!m.homeId || !m.awayId) return ui.toast('<b>!</b> Pick both teams in “Edit” first.', 'toast--error');
+  const H = state.teamMap[m.homeId];
+  const A = state.teamMap[m.awayId];
+  const half = (m.matchMinutes || t.matchMinutes || 20) / 2;
+  const { h, a } = scoreOf(m);
+  const isGoal = (e) => e.type === 'goal' || e.type === 'own_goal';
+  const sideOf = (e) => ((e.type === 'goal') === (e.teamId === m.homeId) ? 'home' : 'away');
+  const rows = (m.events || [])
+    .filter((e) => isGoal(e) && !e.quick)
+    .sort((x, y) => (x.minute ?? 999) - (y.minute ?? 999))
+    .map((e) => ({ id: e.id, side: sideOf(e), val: e.playerId ? `${e.type === 'own_goal' ? 'og' : 'g'}:${e.playerId}` : '', minute: e.minute ?? '' }));
+
+  const opts = (side, sel) => {
+    const own = lineupFor(m, side);
+    const opp = lineupFor(m, side === 'home' ? 'away' : 'home');
+    const o = (v, label) => `<option value="${esc(v)}" ${v === sel ? 'selected' : ''}>${esc(label)}</option>`;
+    return (
+      o('', 'Unknown scorer') +
+      own.map((p) => o(`g:${p.id}`, `${p.number ?? ''} · ${playerName(p)}`)).join('') +
+      (opp.length ? `<optgroup label="Own goal by opponent">${opp.map((p) => o(`og:${p.id}`, `OG · ${p.number ?? ''} ${playerName(p)}`)).join('')}</optgroup>` : '')
+    );
+  };
+  const rowHtml = (r, i) => `<div class="res-row" data-i="${i}"><select data-k="val" aria-label="Scorer">${opts(r.side, r.val)}</select><input type="number" data-k="minute" min="1" max="200" value="${esc(r.minute)}" placeholder="min" aria-label="Minute"><button type="button" class="iconbtn" data-rm="${i}" aria-label="Remove scorer">×</button></div>`;
+  const col = (side) => {
+    const team = side === 'home' ? H : A;
+    return `<div class="res-col" style="--tc:${ui.teamColor(team)}"><h5>${crest(team, 20)} ${esc(team?.name || '')}</h5><div class="res-rows" data-side="${side}"></div><button type="button" class="btn btn-ghost btn-sm" data-add="${side}">+ Add scorer</button></div>`;
+  };
+  const warn = m.status === 'live' ? '<p class="warnbox">This match is running. Saving a result stops the clock and ends it.</p>' : '';
+  modal(
+    m.status === 'ft' ? 'Edit result' : 'Enter result',
+    `${warn}<div class="res-score">
+        <div class="res-team">${crest(H, 44)}<b>${esc(H?.name || 'Home')}</b></div>
+        <input type="number" name="homeGoals" min="0" max="99" value="${h}" class="res-num" aria-label="${esc(H?.name)} goals" required>
+        <span class="res-dash">–</span>
+        <input type="number" name="awayGoals" min="0" max="99" value="${a}" class="res-num" aria-label="${esc(A?.name)} goals" required>
+        <div class="res-team">${crest(A, 44)}<b>${esc(A?.name || 'Away')}</b></div>
+      </div>
+      <p class="muted small">Scorers and minutes are optional. Enter only the score, or add the scorers you know; any other goals are saved as “unknown scorer”. Cards and subs already recorded are kept.</p>
+      <div class="res-cols">${col('home')}${col('away')}</div>`,
+    {
+      submit: 'Save result',
+      wide: true,
+      onMount: (f) => {
+        const paint = () => {
+          f.querySelectorAll('.res-rows').forEach((box) => {
+            box.innerHTML = rows.map((r, i) => (r.side === box.dataset.side ? rowHtml(r, i) : '')).join('') || '<p class="muted small">No scorers entered.</p>';
+          });
+        };
+        paint();
+        const bump = () => {
+          // the score can never be lower than the number of scorers listed
+          for (const [side, name] of [['home', 'homeGoals'], ['away', 'awayGoals']]) {
+            const n = rows.filter((r) => r.side === side).length;
+            if ((+f[name].value || 0) < n) f[name].value = n;
+          }
+        };
+        f.addEventListener('click', (e) => {
+          const add = e.target.closest('[data-add]');
+          if (add) {
+            rows.push({ id: null, side: add.dataset.add, val: '', minute: '' });
+            bump();
+            paint();
+            f.querySelector(`.res-rows[data-side="${add.dataset.add}"] .res-row:last-child select`)?.focus();
+          }
+          const rm = e.target.closest('[data-rm]');
+          if (rm) {
+            rows.splice(+rm.dataset.rm, 1);
+            paint();
+          }
+        });
+        f.addEventListener('input', (e) => {
+          const r = e.target.closest('.res-row');
+          if (r) rows[+r.dataset.i][e.target.dataset.k] = e.target.value;
+        });
+        f.addEventListener('change', (e) => {
+          if (e.target.matches('select')) e.target.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      },
+      onSubmit: async (f) => {
+        const hs = Math.floor(+f.homeGoals.value);
+        const as = Math.floor(+f.awayGoals.value);
+        if (!(hs >= 0 && as >= 0) || f.homeGoals.value === '' || f.awayGoals.value === '') {
+          ui.toast('<b>!</b> Enter a score for both teams.', 'toast--error');
+          return false;
+        }
+        for (const [side, n, team] of [['home', hs, H], ['away', as, A]])
+          if (rows.filter((r) => r.side === side).length > n) {
+            ui.toast(`<b>!</b> ${esc(team.name)} has more scorers listed than goals.`, 'toast--error');
+            return false;
+          }
+        const now = Date.now();
+        await guard(async () => {
+          await runTransaction(db, async (tx) => {
+            const ref = mRef(tid, m.id);
+            const snap = await tx.get(ref);
+            if (!snap.exists()) throw new Error('Match no longer exists');
+            const cur = { id: snap.id, ...snap.data() };
+            const prev = Object.fromEntries((cur.events || []).map((e) => [e.id, e]));
+            const goals = rows.map((r) => {
+              const [kind, pid] = r.val ? r.val.split(':') : ['g', null];
+              const own = kind === 'og';
+              const forHome = r.side === 'home';
+              const minute = r.minute === '' || r.minute == null ? null : Math.max(1, Math.floor(+r.minute));
+              const old = (r.id && prev[r.id]) || {};
+              const ev = {
+                ...old,
+                id: old.id || rid(),
+                type: own ? 'own_goal' : 'goal',
+                teamId: own ? (forHome ? cur.awayId : cur.homeId) : forHome ? cur.homeId : cur.awayId,
+                playerId: pid || null,
+                minute,
+                period: minute != null && minute > half ? '2H' : '1H',
+                at: old.at || now,
+              };
+              if (own || ev.assistId === ev.playerId) delete ev.assistId;
+              if (own) delete ev.pen;
+              delete ev.quick;
+              return ev;
+            });
+            const filler = (side, n) =>
+              Array.from({ length: Math.max(0, n - rows.filter((r) => r.side === side).length) }, () => ({
+                id: rid(),
+                type: 'goal',
+                teamId: side === 'home' ? cur.homeId : cur.awayId,
+                playerId: null,
+                minute: null,
+                period: '1H',
+                at: now,
+                quick: true,
+              }));
+            const events = (cur.events || []).filter((e) => !isGoal(e)).concat(goals, filler('home', hs), filler('away', as));
+            const snapLineup = (id) => ({ players: (state.teamMap[id]?.players || []).map((p) => ({ ...p })) });
+            const fullMs = (cur.matchMinutes || t.matchMinutes || 20) * 60000;
+            tx.update(ref, {
+              events,
+              homeScore: hs,
+              awayScore: as,
+              status: 'ft',
+              period: 'FT',
+              clock: { running: false, startedAt: null, elapsedMs: cur.status === 'scheduled' ? fullMs : clockOf(cur, t, now).elapsed },
+              lineups: cur.lineups || { home: snapLineup(cur.homeId), away: snapLineup(cur.awayId) },
+              resultEnteredAt: now,
+            });
+          });
+          if (t.status !== 'live' && t.status !== 'completed') await updateDoc(tRef(tid), { status: 'live', startedAt: t.startedAt || now }).catch(() => {});
+        }, `Result saved: ${H.name} ${hs}–${as} ${A.name}`);
+      },
+    }
+  );
 }
 
 function editTournament(t) {
+  const rewards = rewardsOf(t).map((r) => ({ title: r.title || '', prize: r.prize || '', link: r.link || '', winner: r.winner || '' }));
   modal(
     'Edit tournament',
     `<div class="fgrid">
@@ -721,8 +940,51 @@ function editTournament(t) {
       <label>Courts<input type="number" name="courts" min="1" max="4" value="${esc(t.courts || 1)}"></label>
     </div>
     <label class="check"><input type="checkbox" name="shift" checked> Move all match kick-off times so the first match starts at this time</label>
-    <p class="muted small">Matches that have already started or finished keep their times.</p>`,
+    <p class="muted small">Matches that have already started or finished keep their times.</p>
+    <h5 class="rw-head">Trophy &amp; rewards <small class="muted">shown on the public home page next to the 3D trophy</small></h5>
+    <div class="rw-row rw-row--head"><span>Award</span><span>Prize</span><span>Winner</span><span></span></div>
+    <div id="rw-rows"></div>
+    <button type="button" class="btn btn-ghost btn-sm" id="rw-add">+ Add reward</button>`,
     {
+      wide: true,
+      onMount: (f) => {
+        const box = f.querySelector('#rw-rows');
+        const paint = () => {
+          box.innerHTML = rewards
+            .map(
+              (r, i) => `<div class="rw-row" data-i="${i}">
+                <input data-k="title" value="${esc(r.title)}" placeholder="e.g. Champions" aria-label="Award">
+                <input data-k="prize" value="${esc(r.prize)}" placeholder="e.g. Trophy + Rs 20,000" aria-label="Prize">
+                <span class="rw-win"><select data-k="link" aria-label="How the winner is decided">${Object.entries(REWARD_LINKS)
+                  .map(([k, v]) => `<option value="${k}" ${r.link === k ? 'selected' : ''}>${esc(v)}</option>`)
+                  .join('')}</select>${r.link ? '' : `<input data-k="winner" value="${esc(r.winner || '')}" placeholder="Name (when decided)" aria-label="Winner">`}</span>
+                <button type="button" class="iconbtn" data-rw-rm="${i}" aria-label="Remove reward">×</button></div>`
+            )
+            .join('');
+        };
+        paint();
+        f.addEventListener('input', (e) => {
+          const r = e.target.closest('.rw-row');
+          if (r && e.target.dataset.k) rewards[+r.dataset.i][e.target.dataset.k] = e.target.value;
+        });
+        f.addEventListener('change', (e) => {
+          if (e.target.dataset.k === 'link') {
+            rewards[+e.target.closest('.rw-row').dataset.i].link = e.target.value;
+            paint();
+          }
+        });
+        f.addEventListener('click', (e) => {
+          if (e.target.id === 'rw-add') {
+            rewards.push({ title: '', prize: '', link: '', winner: '' });
+            paint();
+          }
+          const rm = e.target.closest('[data-rw-rm]');
+          if (rm) {
+            rewards.splice(+rm.dataset.rwRm, 1);
+            paint();
+          }
+        });
+      },
       onSubmit: (f) =>
         guard(async () => {
           const newStart = fromLocalInput(f.startAt.value) || t.startAt;
@@ -733,6 +995,9 @@ function editTournament(t) {
             startAt: newStart,
             status: f.status.value,
             courts: +f.courts.value || 1,
+            rewards: rewards
+              .filter((r) => r.title.trim())
+              .map((r) => ({ title: r.title.trim(), prize: (r.prize || '').trim(), link: r.link || '', winner: r.link ? '' : (r.winner || '').trim() })),
           });
           if (f.shift.checked && state.tid === t.id) {
             // reference = earliest kick-off, so a schedule that drifted re-aligns exactly
@@ -1015,7 +1280,7 @@ function MatchView({ tid, mid }) {
     else if (m.status === 'ft') main = b('reopen', 'Re-open match');
     const adj = m.status === 'live' ? `<div class="row gap small-gap"><span class="muted small">Clock</span>${b('m60', '−1 min', 'btn-ghost btn-sm')}${b('m10', '−10 s', 'btn-ghost btn-sm')}${b('p10', '+10 s', 'btn-ghost btn-sm')}${b('p60', '+1 min', 'btn-ghost btn-sm')}</div>` : '';
     return `<h4>Match control</h4><div class="row gap wrap">${main}</div>${adj}
-      <div class="row gap wrap ctl-secondary">${b('details', `${icon.whistle} Referee &amp; details`, 'btn-ghost btn-sm')}${m.status !== 'scheduled' ? b('reset', 'Reset match', 'btn-ghost btn-sm danger') : ''}</div>`;
+      <div class="row gap wrap ctl-secondary">${b('details', `${icon.whistle} Referee &amp; details`, 'btn-ghost btn-sm')}${b('result', m.status === 'ft' ? '✎ Edit result' : '✎ Enter result (no clock)', 'btn-ghost btn-sm')}${m.status !== 'scheduled' ? b('reset', 'Reset match', 'btn-ghost btn-sm danger') : ''}</div>`;
   }
 
   function quick(m) {
@@ -1043,7 +1308,7 @@ function MatchView({ tid, mid }) {
             ? esc(playerName(idx[e.playerId]))
             : '<span class="muted">No player</span>';
         const extra = e.type === 'goal' && e.assistId ? ` <small>assist ${esc(playerName(idx[e.assistId]))}</small>` : '';
-        return `<li><span class="evmin">${esc(e.minute)}'</span>${ui.eventIcon(e.type)}<span class="evwho">${who}${extra}${e.pen ? ' <small>(pen)</small>' : ''}${e.type === 'own_goal' ? ' <small>(OG)</small>' : ''}</span><span class="evteam">${ui.shortName(
+        return `<li><span class="evmin">${esc(minuteText(e) || '–')}</span>${ui.eventIcon(e.type)}<span class="evwho">${who}${extra}${e.pen ? ' <small>(pen)</small>' : ''}${e.type === 'own_goal' ? ' <small>(OG)</small>' : ''}</span><span class="evteam">${ui.shortName(
           team
         )}</span><button class="iconbtn" data-del-ev="${esc(e.id)}" aria-label="Delete event">×</button></li>`;
       })
@@ -1125,6 +1390,7 @@ function MatchView({ tid, mid }) {
       await upd({ lineups: { home: snap(m.homeId), away: snap(m.awayId) } }, 'Line-ups refreshed');
     }
     if (a === 'details') editMatch(m);
+    if (a === 'result') resultModal(m);
     if (a === 'reset') {
       if (await confirmBox('Reset match?', 'This clears the score, clock, events and saved line-ups for this match.', 'Reset'))
         await upd({ status: 'scheduled', period: 'pre', clock: { running: false, startedAt: null, elapsedMs: 0 }, events: [], homeScore: 0, awayScore: 0, lineups: null, shootout: null }, 'Match reset');
